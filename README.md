@@ -11,7 +11,7 @@ Paper sources and figures are kept under [`Camera_Ready/`](Camera_Ready/).
 
 ## Environment
 
-The experiments were prepared with the following environment:
+The following environment is recommended for the experiments:
 
 ```text
 Python==3.10.19
