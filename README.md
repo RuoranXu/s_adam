@@ -8,18 +8,6 @@ The accompanying manuscript is:
 
 Paper sources and figures are kept under [`Camera_Ready/`](Camera_Ready/).
 
-## Core Idea
-
-Modern neural networks often violate the smooth-gradient assumption because they contain non-smooth components such as ReLU activations, fake quantization, and sparsity-inducing operations. Near these singularities, adaptive optimizers can accumulate conflicting gradient signals and oscillate.
-
-S-Adam addresses this by:
-
-- estimating **Local Geometric Instability (LGI)** through randomized directional loss probes;
-- using LGI as a proxy for local non-smoothness / Clarke subdifferential spread;
-- applying a damping factor `exp(-lambda_LGI * LGI)` to the AdamW update;
-- behaving similarly to AdamW in smooth regions where LGI is small.
-
-In code, each S-Adam optimizer step requires a closure because the optimizer evaluates the baseline loss and several perturbed forward passes to estimate LGI.
 
 ## Environment
 
