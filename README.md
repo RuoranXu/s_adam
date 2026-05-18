@@ -49,7 +49,7 @@ Install dependencies:
 pip install torch==2.9.1 torchvision==0.24.1 numpy==2.2.6 matplotlib==3.10.8 Pillow==12.1.0 psutil==7.2.1
 ```
 
-For GPU runs, install the PyTorch wheel that matches your CUDA version if the default wheel is not suitable for your system.
+Experiments were run on NVIDIA A800 GPUs.
 
 
 ## Key Hyperparameters
