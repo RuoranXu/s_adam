@@ -1,159 +1,102 @@
-import math
-from typing import Callable, Iterable, Optional, Tuple
-
 import torch
 from torch.optim import Optimizer
+import math
 
 
 class SAdam(Optimizer):
-    """Singularity-aware Adam optimizer.
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
+                 weight_decay=1e-2,
+                 k_directions=2,
+                 sigma=0.01,
+                 lgi_lambda=2.0,
+                 stabilize_eps=1e-6):
 
-    S-Adam augments AdamW with randomized geometric probing. At each step it
-    estimates Local Geometric Instability (LGI) from directional loss probes and
-    damps the AdamW update by exp(-lgi_lambda * LGI).
-
-    The optimizer requires a closure because LGI estimation needs one ordinary
-    backward pass and k no-gradient forward probes.
-    """
-
-    def __init__(
-        self,
-        params: Iterable[torch.nn.Parameter],
-        lr: float = 1e-3,
-        betas: Tuple[float, float] = (0.9, 0.999),
-        eps: float = 1e-8,
-        weight_decay: float = 1e-2,
-        k_directions: int = 2,
-        sigma: float = 0.01,
-        lgi_lambda: float = 2.0,
-        stabilize_eps: float = 1e-6,
-        lgi_cap: float = 10.0,
-    ) -> None:
-        if lr < 0:
-            raise ValueError(f"Invalid learning rate: {lr}")
-        if eps < 0:
-            raise ValueError(f"Invalid epsilon value: {eps}")
-        if not 0 <= betas[0] < 1:
-            raise ValueError(f"Invalid beta parameter at index 0: {betas[0]}")
-        if not 0 <= betas[1] < 1:
-            raise ValueError(f"Invalid beta parameter at index 1: {betas[1]}")
-        if weight_decay < 0:
-            raise ValueError(f"Invalid weight_decay value: {weight_decay}")
-        if k_directions < 1:
-            raise ValueError(f"k_directions must be >= 1, got {k_directions}")
-        if sigma <= 0:
-            raise ValueError(f"sigma must be > 0, got {sigma}")
-        if lgi_lambda < 0:
-            raise ValueError(f"lgi_lambda must be >= 0, got {lgi_lambda}")
-
-        defaults = dict(
-            lr=lr,
-            betas=betas,
-            eps=eps,
-            weight_decay=weight_decay,
-            k_directions=k_directions,
-            sigma=sigma,
-            lgi_lambda=lgi_lambda,
-            stabilize_eps=stabilize_eps,
-            lgi_cap=lgi_cap,
-        )
-        super().__init__(params, defaults)
+        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay,
+                        k_directions=k_directions, sigma=sigma,
+                        lgi_lambda=lgi_lambda, stabilize_eps=stabilize_eps)
+        super(SAdam, self).__init__(params, defaults)
         self.lgi_history = []
 
-    @torch.no_grad()
-    def _perturb(self, params, sigma):
-        perturbations = []
-        for param in params:
-            direction = torch.randn_like(param)
-            direction = direction / (direction.norm() + 1e-12)
-            perturbation = sigma * direction
-            param.add_(perturbation)
-            perturbations.append(perturbation)
-        return perturbations
-
-    @torch.no_grad()
-    def _restore(self, params, perturbations):
-        for param, perturbation in zip(params, perturbations):
-            param.sub_(perturbation)
-
-    def _estimate_lgi(self, closure: Callable, params, base_loss: float, group) -> float:
-        if group["lgi_lambda"] == 0:
-            return 0.0
-
-        sigma = group["sigma"]
-        diffs = []
-
-        for _ in range(group["k_directions"]):
-            perturbations = self._perturb(params, sigma)
-            try:
-                with torch.no_grad():
-                    perturbed_loss = closure(backward=False)
-            finally:
-                self._restore(params, perturbations)
-
-            directional_diff = (float(perturbed_loss.item()) - base_loss) / sigma
-            diffs.append(directional_diff)
-
-        diffs_tensor = torch.tensor(diffs, dtype=torch.float32)
-        variance = torch.var(diffs_tensor, unbiased=True) if len(diffs) > 1 else torch.tensor(0.0)
-        mean_square = torch.mean(diffs_tensor.square())
-        lgi = variance / (mean_square + group["stabilize_eps"])
-        return float(lgi.item())
-
-    def step(self, closure: Optional[Callable] = None):
+    def step(self, closure=None):
         if closure is None:
-            raise RuntimeError("SAdam requires a closure for LGI estimation.")
+            raise RuntimeError("S-Adam requires a closure to estimate geometry.")
 
+        loss = None
         with torch.enable_grad():
             loss = closure(backward=True)
-        base_loss = float(loss.item())
-
-        last_lgi = 0.0
+        base_loss = loss.item()
 
         for group in self.param_groups:
-            params_with_grad = [p for p in group["params"] if p.grad is not None]
+            params_with_grad = [p for p in group['params'] if p.grad is not None]
             if not params_with_grad:
                 continue
 
-            lgi = self._estimate_lgi(closure, params_with_grad, base_loss, group)
-            last_lgi = lgi
-            safe_lgi = min(lgi, group["lgi_cap"])
-            damping = math.exp(-group["lgi_lambda"] * safe_lgi)
+            lgi_score = 0.0
+            damping = 1.0
 
-            beta1, beta2 = group["betas"]
-            lr = group["lr"]
-            weight_decay = group["weight_decay"]
-            eps = group["eps"]
+            if group['lgi_lambda'] > 0:
+                k = group['k_directions']
+                sigma = group['sigma']
+                diffs = []
 
-            with torch.no_grad():
-                for param in params_with_grad:
-                    grad = param.grad
-                    state = self.state[param]
+                for _ in range(k):
+                    noise_cache = []
+                    for p in params_with_grad:
+                        u = torch.randn_like(p)
+                        u = u / (u.norm() + 1e-12)
+                        perturbation = sigma * u
+                        p.data.add_(perturbation)
+                        noise_cache.append(perturbation)
 
-                    if len(state) == 0:
-                        state["step"] = 0
-                        state["exp_avg"] = torch.zeros_like(param)
-                        state["exp_avg_sq"] = torch.zeros_like(param)
+                    with torch.no_grad():
+                        try:
+                            loss_perturbed = closure(backward=False)
+                        except TypeError:
+                            loss_perturbed = closure()
 
-                    exp_avg = state["exp_avg"]
-                    exp_avg_sq = state["exp_avg_sq"]
-                    state["step"] += 1
+                    d_i = (loss_perturbed.item() - base_loss) / sigma
+                    diffs.append(d_i)
 
-                    if weight_decay != 0:
-                        param.mul_(1 - lr * weight_decay)
+                    for p, pert in zip(params_with_grad, noise_cache):
+                        p.data.sub_(pert)
 
-                    exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
-                    exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+                d_tensor = torch.tensor(diffs)
+                var_d = torch.var(d_tensor, unbiased=True) if k > 1 else torch.tensor(0.0)
+                mean_sq_d = torch.mean(d_tensor ** 2)
 
-                    bias_correction1 = 1 - beta1 ** state["step"]
-                    bias_correction2 = 1 - beta2 ** state["step"]
-                    step_size = lr * math.sqrt(bias_correction2) / bias_correction1
+                lgi_score = var_d / (mean_sq_d + group['stabilize_eps'])
+                lgi_score = lgi_score.item()
 
-                    denom = exp_avg_sq.sqrt().add_(eps)
-                    param.addcdiv_(exp_avg, denom, value=-step_size * damping)
+                safe_lgi = min(lgi_score, 10.0)
+                damping = math.exp(-group['lgi_lambda'] * safe_lgi)
 
-        self.lgi_history.append(last_lgi)
+            beta1, beta2 = group['betas']
+            for p in params_with_grad:
+                grad = p.grad
+                state = self.state[p]
+
+                if len(state) == 0:
+                    state['step'] = 0
+                    state['exp_avg'] = torch.zeros_like(p)
+                    state['exp_avg_sq'] = torch.zeros_like(p)
+
+                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                state['step'] += 1
+
+                p.data.mul_(1 - group['lr'] * group['weight_decay'])
+
+                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+
+                denom = exp_avg_sq.sqrt().add_(group['eps'])
+
+                bias_correction1 = 1 - beta1 ** state['step']
+                bias_correction2 = 1 - beta2 ** state['step']
+                step_size = group['lr'] * math.sqrt(bias_correction2) / bias_correction1
+
+                p.data.addcdiv_(exp_avg, denom, value=-step_size * damping)
+
+        if len(self.param_groups[0]['params']) > 0:
+            self.lgi_history.append(lgi_score)
+
         return loss
-
-
-__all__ = ["SAdam"]
