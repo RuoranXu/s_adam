@@ -26,9 +26,8 @@ psutil==7.2.1
 Create and activate a virtual environment:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
+conda create -n sadam python=3.10.19
+conda activate sadam
 ```
 
 Install dependencies:
